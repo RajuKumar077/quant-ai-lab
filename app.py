@@ -276,9 +276,9 @@ def compact_table(df: pd.DataFrame, max_rows=25):
     return out
 
 
-def smart_df_height(df: pd.DataFrame, min_height=120, max_height=520):
+def smart_df_height(df: pd.DataFrame, min_height=120, max_height=900):
     rows = 0 if df is None else len(df.index)
-    return int(min(max(min_height + rows * 34, min_height), max_height))
+    return int(min(max(min_height + rows * 38, min_height), max_height))
 
 
 def show_table(df: pd.DataFrame, max_rows=25, hide_index=False):
@@ -506,6 +506,25 @@ def normalize_statement_df(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def format_statement_df(df: pd.DataFrame, scale_mode: str = "Billions", transpose=False) -> tuple[pd.DataFrame, str]:
+    if df is None or df.empty:
+        return pd.DataFrame(), ""
+    out = df.copy()
+    out = out.apply(pd.to_numeric, errors="coerce")
+
+    scale_map = {"Raw": 1.0, "Millions": 1_000_000.0, "Billions": 1_000_000_000.0}
+    divisor = scale_map.get(scale_mode, 1_000_000_000.0)
+    unit_label = "" if scale_mode == "Raw" else f" ({scale_mode.lower()})"
+
+    num_cols = out.columns
+    out[num_cols] = out[num_cols] / divisor
+    out = out.round(3)
+    if transpose:
+        out = out.T
+    out.columns = out.columns.astype(str)
+    return out, unit_label
+
+
 def statement_visual_lab(df: pd.DataFrame, title: str, default_lines):
     data = normalize_statement_df(df)
     if data.empty:
@@ -598,17 +617,35 @@ def statement_visual_lab(df: pd.DataFrame, title: str, default_lines):
         y_labels = heat_df.index.tolist()
         x_idx = list(range(len(x_labels)))
         y_idx = list(range(len(y_labels)))
+        surface_mode = st.radio(
+            f"{title}: 3D mode",
+            ["Lightweight Mesh", "Surface"],
+            horizontal=True,
+            key=f"{title}_3d_mode",
+        )
+        if surface_mode == "Surface":
+            trace = go.Surface(
+                z=heat_df.values,
+                x=x_idx,
+                y=y_idx,
+                colorscale="RdBu",
+                reversescale=True,
+                colorbar=dict(title="Value"),
+            )
+        else:
+            xi, yi = np.meshgrid(x_idx, y_idx)
+            trace = go.Mesh3d(
+                x=xi.flatten(),
+                y=yi.flatten(),
+                z=heat_df.values.flatten(),
+                intensity=heat_df.values.flatten(),
+                colorscale="RdBu",
+                reversescale=True,
+                opacity=0.95,
+                colorbar=dict(title="Value"),
+            )
         surface = go.Figure(
-            data=[
-                go.Surface(
-                    z=heat_df.values,
-                    x=x_idx,
-                    y=y_idx,
-                    colorscale="RdBu",
-                    reversescale=True,
-                    colorbar=dict(title="Value"),
-                )
-            ]
+            data=[trace]
         )
         style_plotly(surface, title=f"{title} 3D Structure Surface", height=560)
         surface.update_layout(
@@ -640,16 +677,32 @@ def statement_visual_lab(df: pd.DataFrame, title: str, default_lines):
             )
         )
         st.plotly_chart(surface, use_container_width=True)
+        st.caption("3D chart tip: drag to rotate, scroll to zoom. If your browser/GPU struggles, use Lightweight Mesh mode.")
 
 
-def show_statement(df: pd.DataFrame, title: str, max_rows=30):
+def show_statement(
+    df: pd.DataFrame,
+    title: str,
+    max_rows=30,
+    scale_mode: str = "Billions",
+    table_height: int = 760,
+    transpose=False,
+):
     st.markdown(f"**{title}**")
     if df.empty:
         st.info("No data available from source.")
         return
-    table = df.copy()
-    table.columns = table.columns.astype(str)
-    show_table(table, max_rows=max_rows)
+    table, unit_label = format_statement_df(df, scale_mode=scale_mode, transpose=transpose)
+    if table.empty:
+        st.info("No numeric data available from source.")
+        return
+    compact = compact_table(table, max_rows=max_rows)
+    st.caption(f"Display unit: {scale_mode}{unit_label}")
+    st.dataframe(
+        compact,
+        use_container_width=True,
+        height=table_height,
+    )
 
 
 @st.cache_data(show_spinner=False)
@@ -922,6 +975,10 @@ with tabs[2]:
     st.subheader("Financial Statements")
 
     mode = st.radio("Statement frequency", ["Annual", "Quarterly"], horizontal=True)
+    cfs1, cfs2, cfs3 = st.columns([1, 1, 1.2])
+    scale_mode = cfs1.selectbox("Statement scale", ["Raw", "Millions", "Billions"], index=2)
+    table_height = cfs2.slider("Table height", 420, 1200, 820, 20)
+    transpose_view = cfs3.toggle("Transpose tables", value=False)
     if mode == "Annual":
         inc, bal, cfs = bundle.financials, bundle.balance_sheet, bundle.cashflow
     else:
@@ -933,11 +990,32 @@ with tabs[2]:
 
     s1, s2, s3 = st.columns(3)
     with s1:
-        show_statement(inc, "Income Statement", max_rows=max_table_rows)
+        show_statement(
+            inc,
+            "Income Statement",
+            max_rows=max_table_rows,
+            scale_mode=scale_mode,
+            table_height=table_height,
+            transpose=transpose_view,
+        )
     with s2:
-        show_statement(bal, "Balance Sheet", max_rows=max_table_rows)
+        show_statement(
+            bal,
+            "Balance Sheet",
+            max_rows=max_table_rows,
+            scale_mode=scale_mode,
+            table_height=table_height,
+            transpose=transpose_view,
+        )
     with s3:
-        show_statement(cfs, "Cash Flow", max_rows=max_table_rows)
+        show_statement(
+            cfs,
+            "Cash Flow",
+            max_rows=max_table_rows,
+            scale_mode=scale_mode,
+            table_height=table_height,
+            transpose=transpose_view,
+        )
 
     rev = statement_series(inc, ["Total Revenue", "Revenue"])
     ni = statement_series(inc, ["Net Income", "Net Income Common Stockholders"])
