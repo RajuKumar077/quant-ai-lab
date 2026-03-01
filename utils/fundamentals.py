@@ -143,6 +143,7 @@ def fetch_ticker_bundle(ticker: str, period: str = "10y") -> TickerBundle:
     quarterly_financials = _empty_df(_safe_attr(t, "quarterly_financials"))
     quarterly_balance_sheet = _empty_df(_safe_attr(t, "quarterly_balance_sheet"))
     quarterly_cashflow = _empty_df(_safe_attr(t, "quarterly_cashflow"))
+    earnings_dates = _empty_df(_safe_attr(t, "earnings_dates"))
 
     # Method fallbacks for environments where property endpoints fail.
     if actions.empty:
@@ -163,6 +164,8 @@ def fetch_ticker_bundle(ticker: str, period: str = "10y") -> TickerBundle:
         quarterly_balance_sheet = _empty_df(_safe_call(t, "get_balance_sheet", freq="quarterly"))
     if quarterly_cashflow.empty:
         quarterly_cashflow = _empty_df(_safe_call(t, "get_cashflow", freq="quarterly"))
+    if earnings_dates.empty:
+        earnings_dates = _empty_df(_safe_call(t, "get_earnings_dates", limit=24))
 
     return TickerBundle(
         ticker=ticker,
@@ -184,7 +187,7 @@ def fetch_ticker_bundle(ticker: str, period: str = "10y") -> TickerBundle:
         insider_roster_holders=_empty_df(_safe_attr(t, "insider_roster_holders")),
         recommendations=_empty_df(_safe_attr(t, "recommendations")),
         upgrades_downgrades=_empty_df(_safe_attr(t, "upgrades_downgrades")),
-        earnings_dates=_empty_df(_safe_attr(t, "earnings_dates")),
+        earnings_dates=earnings_dates,
     )
 
 
