@@ -19,7 +19,7 @@ from utils.simulation import monte_carlo_paths
 from utils.time_series import analyze_time_series, arima_forecast
 
 
-st.set_page_config(page_title="Quant AI Lab", layout="wide")
+st.set_page_config(page_title="AlphaForge Quant Terminal", layout="wide")
 
 
 def inject_apple_glass_theme():
@@ -754,8 +754,8 @@ today = date.today()
 default_start = today - timedelta(days=365 * 5)
 inject_apple_glass_theme()
 render_header_hero(
-    title="Quant AI Lab",
-    subtitle="Section-wise quant research cockpit from a single ticker",
+    title="AlphaForge Quant Terminal",
+    subtitle="End-to-End Factor, Risk, and Valuation Intelligence from One Ticker.",
     image_path="assets/hero-.jpg",
 )
 
