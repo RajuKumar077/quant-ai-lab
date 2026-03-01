@@ -219,6 +219,50 @@ def fmt_pct(x, digits=2):
     return f"{x * 100:.{digits}f}%"
 
 
+def _first_valid(*values):
+    for v in values:
+        if v is None:
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        try:
+            if pd.isna(v):
+                continue
+        except Exception:
+            pass
+        return v
+    return np.nan
+
+
+def build_market_display_info(info: dict, history: pd.DataFrame, close: pd.Series, dividends: pd.Series):
+    out = dict(info or {})
+
+    one_year = close.tail(252)
+    if not one_year.empty:
+        out["fiftyTwoWeekHigh"] = _first_valid(out.get("fiftyTwoWeekHigh"), float(one_year.max()))
+        out["fiftyTwoWeekLow"] = _first_valid(out.get("fiftyTwoWeekLow"), float(one_year.min()))
+
+    if isinstance(history, pd.DataFrame) and not history.empty and "Volume" in history.columns:
+        avg_vol = pd.to_numeric(history["Volume"], errors="coerce").tail(252).mean()
+        out["averageVolume"] = _first_valid(out.get("averageVolume"), avg_vol)
+
+    if isinstance(dividends, pd.Series) and not dividends.empty and not close.empty:
+        trailing_div = pd.to_numeric(dividends, errors="coerce").dropna().tail(4).sum()
+        div_yield = trailing_div / float(close.iloc[-1]) if close.iloc[-1] > 0 else np.nan
+        out["dividendYield"] = _first_valid(out.get("dividendYield"), div_yield)
+
+    trailing_eps = _first_valid(out.get("trailingEps"), out.get("epsTrailingTwelveMonths"))
+    if pd.notna(trailing_eps) and trailing_eps != 0 and not close.empty:
+        pe_fallback = float(close.iloc[-1]) / float(trailing_eps)
+        out["trailingPE"] = _first_valid(out.get("trailingPE"), pe_fallback)
+
+    out["marketCap"] = _first_valid(out.get("marketCap"), out.get("market_cap"))
+    out["currency"] = _first_valid(out.get("currency"), out.get("financialCurrency"))
+    out["exchange"] = _first_valid(out.get("exchange"), out.get("exchangeName"))
+    out["quoteType"] = _first_valid(out.get("quoteType"), out.get("type"))
+    return out
+
+
 def style_plotly(fig: go.Figure, title: str = "", height: int = 380):
     fig.update_layout(
         template="plotly_dark",
@@ -770,7 +814,7 @@ if start_dt >= end_dt:
     st.error("Start date must be before end date.")
     st.stop()
 
-bundle = ensure_bundle_fields(get_bundle(ticker, schema_version="v3"))
+bundle = ensure_bundle_fields(get_bundle(ticker, schema_version="v4"))
 metrics = compute_financial_metrics(bundle)
 health_score = compute_health_score(metrics)
 
@@ -782,7 +826,7 @@ if prices.empty or ticker not in prices.columns:
 close = prices[ticker].dropna()
 returns = close.pct_change().dropna()
 current_price = float(close.iloc[-1])
-info = bundle.info
+info = build_market_display_info(bundle.info, bundle.history, close, bundle.dividends)
 front_risk = calculate_risk_metrics(close, confidence=0.95, horizon_days=1)
 front_dcf = run_dcf_valuation(
     cashflow=bundle.cashflow,
@@ -911,8 +955,19 @@ with tabs[1]:
         "currency",
         "quoteType",
     ]
+    profile_fallback = {
+        "longName": _first_valid(info.get("longName"), info.get("shortName"), ticker),
+        "sector": _first_valid(info.get("sector"), "N/A"),
+        "industry": _first_valid(info.get("industry"), "N/A"),
+        "country": _first_valid(info.get("country"), "N/A"),
+        "fullTimeEmployees": _first_valid(info.get("fullTimeEmployees"), "N/A"),
+        "website": _first_valid(info.get("website"), "N/A"),
+        "exchange": _first_valid(info.get("exchange"), info.get("exchangeName"), "N/A"),
+        "currency": _first_valid(info.get("currency"), info.get("financialCurrency"), "N/A"),
+        "quoteType": _first_valid(info.get("quoteType"), info.get("type"), "N/A"),
+    }
     profile = pd.DataFrame(
-        [{"Field": k, "Value": info.get(k, "N/A")} for k in profile_keys]
+        [{"Field": k, "Value": profile_fallback.get(k, "N/A")} for k in profile_keys]
     )
 
     with mi_tabs[0]:

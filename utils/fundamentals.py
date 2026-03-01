@@ -51,6 +51,35 @@ def _safe_attr(obj, attr_name: str):
         return None
 
 
+def _safe_call(obj, fn_name: str, *args, **kwargs):
+    fn = _safe_attr(obj, fn_name)
+    if callable(fn):
+        try:
+            return fn(*args, **kwargs)
+        except Exception:
+            return None
+    return None
+
+
+def _dict_like_to_dict(value) -> Dict:
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    try:
+        return dict(value)
+    except Exception:
+        return {}
+
+
+def _merge_non_empty(base: Dict, extra: Dict) -> Dict:
+    out = dict(base or {})
+    for k, v in (extra or {}).items():
+        if (k not in out) or pd.isna(out.get(k)):
+            out[k] = v
+    return out
+
+
 def _latest_value(df: pd.DataFrame, keys: Iterable[str]) -> float:
     if df.empty or df.shape[1] == 0:
         return np.nan
@@ -97,21 +126,57 @@ def fetch_ticker_bundle(ticker: str, period: str = "10y") -> TickerBundle:
     history = t.history(period=period, auto_adjust=True)
     history = history.dropna(how="all") if isinstance(history, pd.DataFrame) and not history.empty else pd.DataFrame()
 
-    info = _safe_attr(t, "info") or {}
+    info = _dict_like_to_dict(_safe_attr(t, "info"))
+    if not info:
+        info = _dict_like_to_dict(_safe_call(t, "get_info"))
+    fast_info = _dict_like_to_dict(_safe_attr(t, "fast_info"))
+    if not fast_info:
+        fast_info = _dict_like_to_dict(_safe_call(t, "get_fast_info"))
+    info = _merge_non_empty(info, fast_info)
+
+    actions = _empty_df(_safe_attr(t, "actions"))
+    dividends = _empty_series(_safe_attr(t, "dividends"))
+    splits = _empty_series(_safe_attr(t, "splits"))
+    financials = _empty_df(_safe_attr(t, "financials"))
+    balance_sheet = _empty_df(_safe_attr(t, "balance_sheet"))
+    cashflow = _empty_df(_safe_attr(t, "cashflow"))
+    quarterly_financials = _empty_df(_safe_attr(t, "quarterly_financials"))
+    quarterly_balance_sheet = _empty_df(_safe_attr(t, "quarterly_balance_sheet"))
+    quarterly_cashflow = _empty_df(_safe_attr(t, "quarterly_cashflow"))
+
+    # Method fallbacks for environments where property endpoints fail.
+    if actions.empty:
+        actions = _empty_df(_safe_call(t, "get_actions"))
+    if dividends.empty:
+        dividends = _empty_series(_safe_call(t, "get_dividends"))
+    if splits.empty:
+        splits = _empty_series(_safe_call(t, "get_splits"))
+    if financials.empty:
+        financials = _empty_df(_safe_call(t, "get_income_stmt"))
+    if balance_sheet.empty:
+        balance_sheet = _empty_df(_safe_call(t, "get_balance_sheet"))
+    if cashflow.empty:
+        cashflow = _empty_df(_safe_call(t, "get_cashflow"))
+    if quarterly_financials.empty:
+        quarterly_financials = _empty_df(_safe_call(t, "get_income_stmt", freq="quarterly"))
+    if quarterly_balance_sheet.empty:
+        quarterly_balance_sheet = _empty_df(_safe_call(t, "get_balance_sheet", freq="quarterly"))
+    if quarterly_cashflow.empty:
+        quarterly_cashflow = _empty_df(_safe_call(t, "get_cashflow", freq="quarterly"))
 
     return TickerBundle(
         ticker=ticker,
         info=info,
         history=history,
-        actions=_empty_df(_safe_attr(t, "actions")),
-        dividends=_empty_series(_safe_attr(t, "dividends")),
-        splits=_empty_series(_safe_attr(t, "splits")),
-        financials=_empty_df(_safe_attr(t, "financials")),
-        balance_sheet=_empty_df(_safe_attr(t, "balance_sheet")),
-        cashflow=_empty_df(_safe_attr(t, "cashflow")),
-        quarterly_financials=_empty_df(_safe_attr(t, "quarterly_financials")),
-        quarterly_balance_sheet=_empty_df(_safe_attr(t, "quarterly_balance_sheet")),
-        quarterly_cashflow=_empty_df(_safe_attr(t, "quarterly_cashflow")),
+        actions=actions,
+        dividends=dividends,
+        splits=splits,
+        financials=financials,
+        balance_sheet=balance_sheet,
+        cashflow=cashflow,
+        quarterly_financials=quarterly_financials,
+        quarterly_balance_sheet=quarterly_balance_sheet,
+        quarterly_cashflow=quarterly_cashflow,
         major_holders=_empty_df(_safe_attr(t, "major_holders")),
         institutional_holders=_empty_df(_safe_attr(t, "institutional_holders")),
         mutualfund_holders=_empty_df(_safe_attr(t, "mutualfund_holders")),
