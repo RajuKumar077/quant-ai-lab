@@ -988,34 +988,32 @@ with tabs[2]:
             bundle.quarterly_cashflow,
         )
 
-    s1, s2, s3 = st.columns(3)
-    with s1:
-        show_statement(
-            inc,
-            "Income Statement",
-            max_rows=max_table_rows,
-            scale_mode=scale_mode,
-            table_height=table_height,
-            transpose=transpose_view,
-        )
-    with s2:
-        show_statement(
-            bal,
-            "Balance Sheet",
-            max_rows=max_table_rows,
-            scale_mode=scale_mode,
-            table_height=table_height,
-            transpose=transpose_view,
-        )
-    with s3:
-        show_statement(
-            cfs,
-            "Cash Flow",
-            max_rows=max_table_rows,
-            scale_mode=scale_mode,
-            table_height=table_height,
-            transpose=transpose_view,
-        )
+    show_statement(
+        inc,
+        "Income Statement",
+        max_rows=max_table_rows,
+        scale_mode=scale_mode,
+        table_height=table_height,
+        transpose=transpose_view,
+    )
+    st.divider()
+    show_statement(
+        bal,
+        "Balance Sheet",
+        max_rows=max_table_rows,
+        scale_mode=scale_mode,
+        table_height=table_height,
+        transpose=transpose_view,
+    )
+    st.divider()
+    show_statement(
+        cfs,
+        "Cash Flow",
+        max_rows=max_table_rows,
+        scale_mode=scale_mode,
+        table_height=table_height,
+        transpose=transpose_view,
+    )
 
     rev = statement_series(inc, ["Total Revenue", "Revenue"])
     ni = statement_series(inc, ["Net Income", "Net Income Common Stockholders"])
