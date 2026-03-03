@@ -312,27 +312,131 @@ def compute_financial_metrics(bundle: TickerBundle) -> Dict[str, float]:
     return {**metrics, **ratios, **valuation, **growth}
 
 
-def compute_health_score(metrics: Dict[str, float]) -> float:
-    """Weighted financial strength score in range [0, 100]."""
+def compute_health_score_details(metrics: Dict[str, float]) -> Dict[str, float]:
+    """Financial health framework with category-level transparency."""
 
-    def bounded(value: float, low: float, high: float) -> float:
+    def bounded(value: float, low: float, high: float, inverse: bool = False) -> float:
         if pd.isna(value):
             return 0.5
         x = (value - low) / (high - low)
-        return float(np.clip(x, 0, 1))
+        x = float(np.clip(x, 0, 1))
+        return 1.0 - x if inverse else x
 
-    roe_s = bounded(metrics.get("roe", np.nan), 0.0, 0.25)
-    rev_s = bounded(metrics.get("revenue_cagr", np.nan), -0.05, 0.2)
-    debt_inv_s = 1 - bounded(metrics.get("debt_to_equity", np.nan), 0.0, 2.5)
-    fcf_s = bounded(metrics.get("fcf_cagr", np.nan), -0.1, 0.2)
-    margin_s = bounded(metrics.get("operating_margin", np.nan), 0.0, 0.35)
+    revenue = metrics.get("revenue", np.nan)
+    fcf = metrics.get("free_cash_flow", np.nan)
+    fcf_margin = fcf / revenue if pd.notna(fcf) and pd.notna(revenue) and revenue not in (0, 0.0) else np.nan
 
-    score = (
-        0.20 * roe_s
-        + 0.20 * rev_s
-        + 0.15 * debt_inv_s
-        + 0.15 * fcf_s
-        + 0.15 * margin_s
-        + 0.15 * (1 - bounded(metrics.get("debt_to_assets", np.nan), 0.0, 0.8))
+    category_scores = {
+        "profitability": float(
+            np.mean(
+                [
+                    bounded(metrics.get("gross_margin", np.nan), 0.18, 0.58),
+                    bounded(metrics.get("operating_margin", np.nan), 0.06, 0.34),
+                    bounded(metrics.get("net_margin", np.nan), 0.04, 0.28),
+                    bounded(metrics.get("roe", np.nan), 0.08, 0.45),
+                    bounded(metrics.get("roic", np.nan), 0.06, 0.32),
+                ]
+            )
+        ),
+        "growth": float(
+            np.mean(
+                [
+                    bounded(metrics.get("revenue_cagr", np.nan), -0.01, 0.16),
+                    bounded(metrics.get("net_income_cagr", np.nan), -0.03, 0.20),
+                    bounded(metrics.get("fcf_cagr", np.nan), -0.03, 0.20),
+                    bounded(metrics.get("eps_growth_proxy", np.nan), -0.08, 0.22),
+                ]
+            )
+        ),
+        "solvency_liquidity": float(
+            np.mean(
+                [
+                    bounded(metrics.get("debt_to_assets", np.nan), 0.12, 0.72, inverse=True),
+                    bounded(metrics.get("debt_to_equity", np.nan), 0.10, 4.00, inverse=True),
+                    bounded(metrics.get("current_ratio", np.nan), 0.75, 2.20),
+                    bounded(metrics.get("quick_ratio", np.nan), 0.65, 2.00),
+                    bounded(metrics.get("cash_ratio", np.nan), 0.12, 1.00),
+                ]
+            )
+        ),
+        "cash_efficiency": float(
+            np.mean(
+                [
+                    bounded(fcf_margin, 0.02, 0.32),
+                    bounded(metrics.get("asset_turnover", np.nan), 0.25, 1.40),
+                    bounded(1.0 if pd.notna(fcf) and fcf > 0 else 0.0, 0.0, 1.0),
+                ]
+            )
+        ),
+    }
+
+    category_weights = {
+        "profitability": 0.35,
+        "growth": 0.20,
+        "solvency_liquidity": 0.25,
+        "cash_efficiency": 0.20,
+    }
+
+    weighted = 0.0
+    weight_sum = 0.0
+    for k, w in category_weights.items():
+        v = category_scores.get(k, np.nan)
+        if pd.notna(v):
+            weighted += w * float(v)
+            weight_sum += w
+    base_score = (weighted / weight_sum) if weight_sum > 0 else 0.5
+
+    bonus = 0.0
+    if (
+        pd.notna(metrics.get("roe", np.nan))
+        and metrics.get("roe", 0.0) > 0.25
+        and pd.notna(fcf_margin)
+        and fcf_margin > 0.14
+        and pd.notna(metrics.get("debt_to_assets", np.nan))
+        and metrics.get("debt_to_assets", 1.0) < 0.55
+    ):
+        bonus += 0.05
+
+    if (
+        pd.notna(metrics.get("debt_to_assets", np.nan))
+        and metrics.get("debt_to_assets", 0.0) > 0.80
+        and pd.notna(metrics.get("current_ratio", np.nan))
+        and metrics.get("current_ratio", 2.0) < 0.80
+    ):
+        bonus -= 0.08
+
+    final_score = float(np.clip((base_score + bonus) * 100, 0, 100))
+    coverage = float(
+        np.mean(
+            [
+                pd.notna(metrics.get("gross_margin", np.nan)),
+                pd.notna(metrics.get("operating_margin", np.nan)),
+                pd.notna(metrics.get("net_margin", np.nan)),
+                pd.notna(metrics.get("roe", np.nan)),
+                pd.notna(metrics.get("roic", np.nan)),
+                pd.notna(metrics.get("revenue_cagr", np.nan)),
+                pd.notna(metrics.get("net_income_cagr", np.nan)),
+                pd.notna(metrics.get("fcf_cagr", np.nan)),
+                pd.notna(metrics.get("debt_to_assets", np.nan)),
+                pd.notna(metrics.get("debt_to_equity", np.nan)),
+                pd.notna(metrics.get("current_ratio", np.nan)),
+                pd.notna(metrics.get("quick_ratio", np.nan)),
+                pd.notna(metrics.get("cash_ratio", np.nan)),
+                pd.notna(fcf_margin),
+            ]
+        )
     )
-    return float(100 * score)
+
+    return {
+        "score": final_score,
+        "coverage": coverage,
+        "fcf_margin": float(fcf_margin) if pd.notna(fcf_margin) else np.nan,
+        "profitability_score": float(category_scores["profitability"] * 100),
+        "growth_score": float(category_scores["growth"] * 100),
+        "solvency_liquidity_score": float(category_scores["solvency_liquidity"] * 100),
+        "cash_efficiency_score": float(category_scores["cash_efficiency"] * 100),
+    }
+
+
+def compute_health_score(metrics: Dict[str, float]) -> float:
+    return float(compute_health_score_details(metrics)["score"])

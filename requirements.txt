@@ -8,3 +8,5 @@ PyPortfolioOpt
 statsmodels
 scipy
 lxml
+reportlab
+matplotlib

@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 import base64
 from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -12,8 +13,17 @@ from models.financial_ml import forecast_statement_series, run_ml_models
 from models.portfolio_optimization import optimize_portfolio
 from models.valuation import run_dcf_valuation
 from utils.data_loader import load_price_data
-from utils.fundamentals import compute_financial_metrics, compute_health_score, fetch_ticker_bundle
+from utils.fundamentals import (
+    compute_financial_metrics,
+    compute_health_score,
+    compute_health_score_details,
+    fetch_ticker_bundle,
+)
 from utils.indicators import add_indicators
+try:
+    from utils.pdf_report import generate_company_findings_pdf
+except ModuleNotFoundError:
+    generate_company_findings_pdf = None
 from utils.risk import calculate_risk_metrics, return_series_stats
 from utils.simulation import monte_carlo_paths
 from utils.time_series import analyze_time_series, arima_forecast
@@ -152,6 +162,43 @@ def inject_apple_glass_theme():
                 border-radius: 12px;
                 border: 1px solid rgba(255,255,255,0.2);
             }
+            .report-widget {
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(186, 205, 255, 0.24);
+                border-radius: 16px;
+                padding: 10px 10px 8px 10px;
+                margin-top: 4px;
+                box-shadow: 0 12px 24px rgba(4, 8, 24, 0.28);
+            }
+            .report-widget-title {
+                font-size: 0.78rem;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                color: #dbe6ff;
+                margin: 0 0 6px 0;
+                text-transform: uppercase;
+            }
+            .report-widget-note {
+                font-size: 0.72rem;
+                color: #98a9d7;
+                margin-top: 6px;
+                line-height: 1.3;
+            }
+            .stDownloadButton > button {
+                min-height: 34px;
+                font-size: 0.82rem;
+                font-weight: 600;
+                border-radius: 10px;
+                padding: 0.25rem 0.55rem;
+                border: 1px solid rgba(153, 180, 246, 0.42);
+                background: linear-gradient(180deg, rgba(108, 136, 230, 0.92), rgba(78, 110, 206, 0.92));
+                color: #f5f8ff;
+                box-shadow: 0 8px 16px rgba(28, 58, 142, 0.35);
+            }
+            .stDownloadButton > button:hover {
+                border-color: rgba(184, 206, 255, 0.70);
+                background: linear-gradient(180deg, rgba(122, 150, 246, 0.95), rgba(89, 122, 219, 0.95));
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -199,6 +246,27 @@ def render_header_hero(title: str, subtitle: str, image_path: str = "assets/hero
 
 def parse_tickers(text):
     return [t.strip().upper() for t in text.split(",") if t.strip()]
+
+
+def financial_year_to_dates(label: str):
+    match = re.match(r"^FY(\d{2})$", (label or "").strip().upper())
+    if not match:
+        return None
+    fy_end_year = 2000 + int(match.group(1))
+    start = date(fy_end_year - 1, 4, 1)
+    end = date(fy_end_year, 3, 31)
+    return start, end
+
+
+def current_financial_year_label(today_: date):
+    fy_end_year = today_.year + 1 if today_.month >= 4 else today_.year
+    return f"FY{str(fy_end_year)[-2:]}"
+
+
+def financial_year_options(today_: date, back_years: int = 14, forward_years: int = 1):
+    current_end = today_.year + 1 if today_.month >= 4 else today_.year
+    all_end_years = range(current_end + forward_years, current_end - back_years - 1, -1)
+    return [f"FY{str(y)[-2:]}" for y in all_end_years]
 
 
 def fmt_money(x):
@@ -399,47 +467,58 @@ def normalize_score(value: float, low: float, high: float, inverse=False) -> flo
     return float(np.clip(score, 0, 1))
 
 
+def normalize_score_optional(value: float, low: float, high: float, inverse=False):
+    if pd.isna(value):
+        return np.nan
+    return normalize_score(value, low, high, inverse=inverse)
+
+
 def build_hedge_fund_scorecard(metrics: dict, risk: dict, dcf: dict, close: pd.Series) -> pd.DataFrame:
     indicators = add_indicators(close).dropna()
     latest_rsi = indicators["rsi_14"].iloc[-1] if not indicators.empty and "rsi_14" in indicators.columns else np.nan
     momentum_90 = close.pct_change(90).iloc[-1] if len(close) > 90 else np.nan
 
     growth_components = [
-        normalize_score(metrics.get("revenue_cagr", np.nan), -0.05, 0.25),
-        normalize_score(metrics.get("net_income_cagr", np.nan), -0.10, 0.30),
-        normalize_score(metrics.get("fcf_cagr", np.nan), -0.10, 0.30),
-        normalize_score(metrics.get("eps_growth_proxy", np.nan), -0.20, 0.40),
+        normalize_score_optional(metrics.get("revenue_cagr", np.nan), -0.05, 0.25),
+        normalize_score_optional(metrics.get("net_income_cagr", np.nan), -0.10, 0.30),
+        normalize_score_optional(metrics.get("fcf_cagr", np.nan), -0.10, 0.30),
+        normalize_score_optional(metrics.get("eps_growth_proxy", np.nan), -0.20, 0.40),
     ]
     profitability_components = [
-        normalize_score(metrics.get("gross_margin", np.nan), 0.05, 0.70),
-        normalize_score(metrics.get("operating_margin", np.nan), 0.00, 0.40),
-        normalize_score(metrics.get("net_margin", np.nan), -0.05, 0.30),
-        normalize_score(metrics.get("roe", np.nan), 0.00, 0.30),
-        normalize_score(metrics.get("roa", np.nan), 0.00, 0.20),
-        normalize_score(metrics.get("roic", np.nan), 0.00, 0.30),
+        normalize_score_optional(metrics.get("gross_margin", np.nan), 0.05, 0.70),
+        normalize_score_optional(metrics.get("operating_margin", np.nan), 0.00, 0.40),
+        normalize_score_optional(metrics.get("net_margin", np.nan), -0.05, 0.30),
+        normalize_score_optional(metrics.get("roe", np.nan), 0.00, 0.30),
+        normalize_score_optional(metrics.get("roa", np.nan), 0.00, 0.20),
+        normalize_score_optional(metrics.get("roic", np.nan), 0.00, 0.30),
     ]
     stability_components = [
-        normalize_score(metrics.get("debt_to_equity", np.nan), 0.00, 2.50, inverse=True),
-        normalize_score(metrics.get("debt_to_assets", np.nan), 0.00, 0.80, inverse=True),
-        normalize_score(metrics.get("current_ratio", np.nan), 0.80, 3.00),
-        normalize_score(metrics.get("quick_ratio", np.nan), 0.60, 2.50),
+        normalize_score_optional(metrics.get("debt_to_equity", np.nan), 0.00, 2.50, inverse=True),
+        normalize_score_optional(metrics.get("debt_to_assets", np.nan), 0.00, 0.80, inverse=True),
+        normalize_score_optional(metrics.get("current_ratio", np.nan), 0.80, 3.00),
+        normalize_score_optional(metrics.get("quick_ratio", np.nan), 0.60, 2.50),
     ]
     valuation_components = [
-        normalize_score(metrics.get("pe", np.nan), 8.00, 45.00, inverse=True),
-        normalize_score(metrics.get("peg", np.nan), 0.70, 3.00, inverse=True),
-        normalize_score(metrics.get("price_to_book", np.nan), 1.00, 12.00, inverse=True),
-        normalize_score(metrics.get("ev_to_ebitda", np.nan), 6.00, 30.00, inverse=True),
-        normalize_score(dcf.get("undervaluation_pct", np.nan), -0.40, 0.40),
+        normalize_score_optional(metrics.get("pe", np.nan), 8.00, 45.00, inverse=True),
+        normalize_score_optional(metrics.get("forward_pe", np.nan), 8.00, 40.00, inverse=True),
+        normalize_score_optional(metrics.get("peg", np.nan), 0.70, 3.00, inverse=True),
+        normalize_score_optional(metrics.get("price_to_book", np.nan), 1.00, 12.00, inverse=True),
+        normalize_score_optional(metrics.get("ev_to_ebitda", np.nan), 6.00, 30.00, inverse=True),
     ]
+    dcf_conf = dcf.get("dcf_confidence", np.nan)
+    dcf_component = normalize_score_optional(dcf.get("undervaluation_pct", np.nan), -0.30, 0.30)
+    if pd.notna(dcf_conf) and dcf_conf >= 0.45:
+        valuation_components.append(dcf_component)
+
     risk_components = [
-        normalize_score(risk.get("annualized_volatility", np.nan), 0.10, 0.60, inverse=True),
-        normalize_score(risk.get("max_drawdown", np.nan), 0.10, 0.70, inverse=True),
-        normalize_score(risk.get("sharpe_ratio", np.nan), 0.00, 2.00),
-        normalize_score(risk.get("sortino_ratio", np.nan), 0.00, 3.00),
+        normalize_score_optional(risk.get("annualized_volatility", np.nan), 0.10, 0.60, inverse=True),
+        normalize_score_optional(risk.get("max_drawdown", np.nan), 0.10, 0.70, inverse=True),
+        normalize_score_optional(risk.get("sharpe_ratio", np.nan), 0.00, 2.00),
+        normalize_score_optional(risk.get("sortino_ratio", np.nan), 0.00, 3.00),
     ]
     behavior_components = [
-        normalize_score(momentum_90, -0.30, 0.50),
-        normalize_score(latest_rsi, 30.0, 70.0),
+        normalize_score_optional(momentum_90, -0.30, 0.50),
+        normalize_score_optional(latest_rsi, 30.0, 70.0),
     ]
 
     categories = [
@@ -452,13 +531,34 @@ def build_hedge_fund_scorecard(metrics: dict, risk: dict, dcf: dict, close: pd.S
     ]
 
     rows = []
+    coverage_map = {}
     for name, comps in categories:
-        value = float(np.mean(comps) * 10)
+        valid = [x for x in comps if pd.notna(x)]
+        value = float(np.mean(valid) * 10) if valid else 5.0
+        coverage = float(len(valid) / len(comps)) if comps else 0.0
+        coverage_map[name] = coverage
         rows.append({"Category": name, "Score": value})
 
     out = pd.DataFrame(rows)
     out["Score"] = out["Score"].round(2)
-    out["Weight"] = [0.20, 0.20, 0.15, 0.20, 0.15, 0.10]
+    base_weights = {
+        "Growth": 0.18,
+        "Profitability": 0.22,
+        "Financial Stability": 0.16,
+        "Valuation": 0.18,
+        "Risk": 0.16,
+        "Market Behavior": 0.10,
+    }
+    raw_weights = []
+    for c in out["Category"]:
+        conf_adj = coverage_map.get(c, 0.5)
+        if c == "Valuation" and pd.notna(dcf_conf):
+            conf_adj = float(np.clip(0.70 * conf_adj + 0.30 * dcf_conf, 0.25, 1.0))
+        raw_weights.append(base_weights.get(c, 0.1) * max(conf_adj, 0.25))
+    w = np.array(raw_weights, dtype=float)
+    w = w / w.sum() if w.sum() > 0 else np.full(len(out), 1 / len(out))
+    out["Weight"] = w
+    out["Coverage"] = out["Category"].map(coverage_map).round(2)
     out["Weighted"] = (out["Score"] * out["Weight"]).round(2)
     return out
 
@@ -805,8 +905,25 @@ render_header_hero(
 
 st.sidebar.header("Inputs")
 ticker = st.sidebar.text_input("Primary ticker", "AAPL").upper().strip()
-start_dt = st.sidebar.date_input("Price start", default_start)
-end_dt = st.sidebar.date_input("Price end", today)
+date_mode = st.sidebar.radio("Date mode", ["Financial Year", "Custom"], index=0)
+selected_fy = None
+if date_mode == "Financial Year":
+    fy_choices = financial_year_options(today)
+    default_fy = current_financial_year_label(today)
+    default_idx = fy_choices.index(default_fy) if default_fy in fy_choices else 0
+    selected_fy = st.sidebar.selectbox("Select financial year", fy_choices, index=default_idx)
+    fy_dates = financial_year_to_dates(selected_fy)
+    if fy_dates is None:
+        start_dt, end_dt = default_start, today
+    else:
+        start_dt, fy_end = fy_dates
+        end_dt = min(today, fy_end)
+    st.sidebar.caption(
+        f"Using {selected_fy}: {start_dt.isoformat()} to {end_dt.isoformat()} (market data available to today)."
+    )
+else:
+    start_dt = st.sidebar.date_input("Price start", default_start)
+    end_dt = st.sidebar.date_input("Price end", today)
 portfolio_text = st.sidebar.text_input("Portfolio tickers", "AAPL,MSFT,GOOGL,AMZN")
 max_table_rows = st.sidebar.slider("Max table rows", 10, 200, 40, 5)
 
@@ -816,7 +933,8 @@ if start_dt >= end_dt:
 
 bundle = ensure_bundle_fields(get_bundle(ticker, schema_version="v4"))
 metrics = compute_financial_metrics(bundle)
-health_score = compute_health_score(metrics)
+health_details = compute_health_score_details(metrics)
+health_score = float(health_details.get("score", compute_health_score(metrics)))
 
 prices = get_prices([ticker], start_dt, end_dt)
 if prices.empty or ticker not in prices.columns:
@@ -840,6 +958,233 @@ front_dcf = run_dcf_valuation(
 )
 scorecard_df = build_hedge_fund_scorecard(metrics, front_risk, front_dcf, close)
 overall_score = float(scorecard_df["Weighted"].sum()) if not scorecard_df.empty else np.nan
+
+ml_snapshot = run_ml_models(close)
+arima_snapshot = arima_forecast(close, steps=30, order=(1, 1, 1))
+returns_snapshot = close.pct_change().dropna()
+date_span_text = f"{start_dt.isoformat()} -> {end_dt.isoformat()}"
+fy_label_for_report = selected_fy if selected_fy else "Custom Range"
+
+executive_summary_items = [
+    ("Ticker", ticker),
+    ("Market Data Range", date_span_text),
+    ("Fiscal Period", fy_label_for_report),
+    ("Current Price", fmt_money(current_price)),
+    ("Market Cap", fmt_money(info.get("marketCap", np.nan))),
+    ("Financial Health Score", f"{health_score:.1f} / 100"),
+    ("Health Data Coverage", fmt_pct(health_details.get("coverage", np.nan))),
+    ("Overall Desk Score", f"{overall_score:.2f} / 10" if pd.notna(overall_score) else "N/A"),
+    ("Annualized Volatility", fmt_pct(front_risk.get("annualized_volatility", np.nan))),
+    ("Max Drawdown", fmt_pct(front_risk.get("max_drawdown", np.nan))),
+    ("DCF Intrinsic Value/Share", fmt_money(front_dcf.get("intrinsic_per_share", np.nan))),
+    (
+        "DCF Fair Value Range",
+        f"{fmt_money(front_dcf.get('intrinsic_per_share_low', np.nan))} - {fmt_money(front_dcf.get('intrinsic_per_share_high', np.nan))}",
+    ),
+    ("DCF Undervaluation", fmt_pct(front_dcf.get("undervaluation_pct", np.nan))),
+]
+
+if isinstance(ml_snapshot, dict) and "error" not in ml_snapshot:
+    executive_summary_items.extend(
+        [
+            ("ML Next Price", fmt_money(ml_snapshot.get("next_price", np.nan))),
+            ("ML Up Probability", fmt_pct(ml_snapshot.get("up_probability", np.nan))),
+            ("ML RMSE", fmt_num(ml_snapshot.get("rmse", np.nan), 4)),
+        ]
+    )
+
+core_sections_for_pdf = {
+    "Company Snapshot": pd.DataFrame(
+        [
+            {"Field": "Long Name", "Value": _first_valid(info.get("longName"), info.get("shortName"), ticker)},
+            {"Field": "Sector", "Value": _first_valid(info.get("sector"), "N/A")},
+            {"Field": "Industry", "Value": _first_valid(info.get("industry"), "N/A")},
+            {"Field": "Country", "Value": _first_valid(info.get("country"), "N/A")},
+            {"Field": "Currency", "Value": _first_valid(info.get("currency"), info.get("financialCurrency"), "N/A")},
+        ]
+    ),
+    "Financial Metrics": pd.DataFrame(
+        [
+            ("Gross Margin", fmt_pct(metrics.get("gross_margin"))),
+            ("Operating Margin", fmt_pct(metrics.get("operating_margin"))),
+            ("Net Margin", fmt_pct(metrics.get("net_margin"))),
+            ("ROE", fmt_pct(metrics.get("roe"))),
+            ("ROA", fmt_pct(metrics.get("roa"))),
+            ("ROIC", fmt_pct(metrics.get("roic"))),
+            ("Current Ratio", fmt_num(metrics.get("current_ratio"), 3)),
+            ("Quick Ratio", fmt_num(metrics.get("quick_ratio"), 3)),
+            ("Debt/Equity", fmt_num(metrics.get("debt_to_equity"), 3)),
+            ("Revenue CAGR", fmt_pct(metrics.get("revenue_cagr"))),
+            ("Net Income CAGR", fmt_pct(metrics.get("net_income_cagr"))),
+            ("FCF CAGR", fmt_pct(metrics.get("fcf_cagr"))),
+        ],
+        columns=["Metric", "Value"],
+    ),
+    "Risk Metrics": pd.DataFrame(
+        [
+            ("Historical VaR", fmt_pct(front_risk.get("historical_var", np.nan))),
+            ("Parametric VaR", fmt_pct(front_risk.get("parametric_var", np.nan))),
+            ("Sharpe Ratio", fmt_num(front_risk.get("sharpe_ratio", np.nan), 3)),
+            ("Sortino Ratio", fmt_num(front_risk.get("sortino_ratio", np.nan), 3)),
+            ("Annualized Volatility", fmt_pct(front_risk.get("annualized_volatility", np.nan))),
+            ("Max Drawdown", fmt_pct(front_risk.get("max_drawdown", np.nan))),
+        ],
+        columns=["Metric", "Value"],
+    ),
+    "Valuation Output": pd.DataFrame(
+        [
+            ("Discount Rate", fmt_pct(front_dcf.get("discount_rate", np.nan))),
+            ("Cost of Equity", fmt_pct(front_dcf.get("cost_of_equity", np.nan))),
+            ("Intrinsic Value/Share", fmt_money(front_dcf.get("intrinsic_per_share", np.nan))),
+            (
+                "Fair Value Range",
+                f"{fmt_money(front_dcf.get('intrinsic_per_share_low', np.nan))} - {fmt_money(front_dcf.get('intrinsic_per_share_high', np.nan))}",
+            ),
+            ("Current Price", fmt_money(front_dcf.get("current_price", np.nan))),
+            ("Undervaluation", fmt_pct(front_dcf.get("undervaluation_pct", np.nan))),
+        ],
+        columns=["Metric", "Value"],
+    ),
+    "DCF Assumptions & Sensitivity": pd.DataFrame(
+        [
+            ("Forecast Horizon (years)", f"{int(front_dcf.get('forecast_years', 0) or 0)}"),
+            ("Latest FCF", fmt_money(front_dcf.get("fcf_last", np.nan))),
+            ("Normalized Start FCF", fmt_money(front_dcf.get("fcf_start_normalized", np.nan))),
+            ("Base FCF Growth", fmt_pct(front_dcf.get("base_fcf_growth", np.nan))),
+            ("FCF Growth Volatility", fmt_pct(front_dcf.get("fcf_growth_vol", np.nan))),
+            ("Bear Start Growth", fmt_pct(front_dcf.get("scenario_growth_bear", np.nan))),
+            ("Base Start Growth", fmt_pct(front_dcf.get("scenario_growth_base", np.nan))),
+            ("Bull Start Growth", fmt_pct(front_dcf.get("scenario_growth_bull", np.nan))),
+            ("Terminal Growth", fmt_pct(front_dcf.get("terminal_growth", np.nan))),
+            ("DCF Confidence", fmt_pct(front_dcf.get("dcf_confidence", np.nan))),
+            ("FCF Observations Used", f"{int(front_dcf.get('fcf_observations', 0) or 0)}"),
+        ],
+        columns=["Metric", "Value"],
+    ),
+    "Hedge Fund Scorecard": scorecard_df.copy() if not scorecard_df.empty else pd.DataFrame(),
+    "Return Snapshot": returns_snapshot.tail(120).rename("return").to_frame(),
+}
+
+if isinstance(ml_snapshot, dict):
+    if "error" in ml_snapshot:
+        core_sections_for_pdf["ML Model Snapshot"] = pd.DataFrame(
+            [{"Metric": "Status", "Value": ml_snapshot.get("error", "ML output unavailable")}]
+        )
+    else:
+        core_sections_for_pdf["ML Model Snapshot"] = pd.DataFrame(
+            [
+                ("RMSE", fmt_num(ml_snapshot.get("rmse", np.nan), 4)),
+                ("MAE", fmt_num(ml_snapshot.get("mae", np.nan), 4)),
+                ("CV RMSE", fmt_num(ml_snapshot.get("cv_rmse", np.nan), 4)),
+                ("CV MAE", fmt_num(ml_snapshot.get("cv_mae", np.nan), 4)),
+                ("Next Price", fmt_money(ml_snapshot.get("next_price", np.nan))),
+                ("Up Probability", fmt_pct(ml_snapshot.get("up_probability", np.nan))),
+                ("Raw Up Probability", fmt_pct(ml_snapshot.get("up_probability_raw", np.nan))),
+                ("Signal", ml_snapshot.get("signal", "N/A")),
+                ("Signal Threshold", fmt_pct(ml_snapshot.get("signal_threshold", np.nan))),
+                ("CV Accuracy", fmt_pct(ml_snapshot.get("cv_accuracy", np.nan))),
+                ("CV AUC", fmt_num(ml_snapshot.get("cv_auc", np.nan), 3)),
+                ("CV Brier Loss", fmt_num(ml_snapshot.get("cv_brier", np.nan), 4)),
+                ("Overfit Gap", fmt_pct(ml_snapshot.get("overfit_gap", np.nan))),
+                ("Backtest Annual Return", fmt_pct(ml_snapshot.get("bt_annual_return", np.nan))),
+                ("Backtest Sharpe", fmt_num(ml_snapshot.get("bt_sharpe", np.nan), 3)),
+                ("Backtest Max Drawdown", fmt_pct(ml_snapshot.get("bt_max_drawdown", np.nan))),
+                ("Backtest Hit Rate", fmt_pct(ml_snapshot.get("bt_hit_rate", np.nan))),
+                ("Validation Method", ml_snapshot.get("validation_method", "N/A")),
+            ],
+            columns=["Metric", "Value"],
+        )
+
+if isinstance(arima_snapshot, pd.DataFrame) and not arima_snapshot.empty:
+    core_sections_for_pdf["ARIMA Forecast (30 steps)"] = arima_snapshot.reset_index()
+
+raw_sections_for_pdf = {
+    "info (flattened)": pd.DataFrame([{"key": k, "value": v} for k, v in sorted(info.items(), key=lambda x: x[0])]),
+    "history": bundle.history,
+    "actions": bundle.actions,
+    "dividends": bundle.dividends,
+    "splits": bundle.splits,
+    "financials": bundle.financials,
+    "balance_sheet": bundle.balance_sheet,
+    "cashflow": bundle.cashflow,
+    "quarterly_financials": bundle.quarterly_financials,
+    "quarterly_balance_sheet": bundle.quarterly_balance_sheet,
+    "quarterly_cashflow": bundle.quarterly_cashflow,
+    "major_holders": bundle.major_holders,
+    "institutional_holders": bundle.institutional_holders,
+    "mutualfund_holders": bundle.mutualfund_holders,
+    "insider_transactions": bundle.insider_transactions,
+    "insider_roster_holders": bundle.insider_roster_holders,
+    "recommendations": bundle.recommendations,
+    "upgrades_downgrades": bundle.upgrades_downgrades,
+    "earnings_dates": bundle.earnings_dates,
+    "close_prices": close.to_frame(name="close"),
+    "returns": returns_snapshot.to_frame(name="return"),
+}
+
+trend_view = (
+    "stable"
+    if abs(metrics.get("revenue_cagr", 0) or 0) < 0.03
+    else "growing"
+    if (metrics.get("revenue_cagr", 0) or 0) > 0
+    else "contracting"
+)
+report_summary_text = (
+    f"{ticker} screens as {trend_view}; health score {health_score:.1f}/100, "
+    f"ROE {fmt_pct(metrics.get('roe'))}, debt/equity {fmt_num(metrics.get('debt_to_equity'), 2)}, "
+    f"annualized volatility {fmt_pct(front_risk.get('annualized_volatility', np.nan))}, "
+    f"DCF range {fmt_money(front_dcf.get('intrinsic_per_share_low', np.nan))} to {fmt_money(front_dcf.get('intrinsic_per_share_high', np.nan))}."
+)
+
+pdf_bytes = None
+if generate_company_findings_pdf is not None:
+    pdf_bytes = generate_company_findings_pdf(
+        {
+            "ticker": ticker,
+            "date_span": date_span_text,
+            "fiscal_period": fy_label_for_report,
+            "summary_items": executive_summary_items,
+            "analyst_summary": report_summary_text,
+            "core_sections": core_sections_for_pdf,
+            "raw_sections": raw_sections_for_pdf,
+            "raw_max_rows": max(60, max_table_rows),
+            "chart_data": {
+                "close_prices": close.to_frame(name="close"),
+                "returns": returns_snapshot.to_frame(name="return"),
+                "scorecard": scorecard_df.copy() if not scorecard_df.empty else pd.DataFrame(),
+                "risk_metrics": front_risk,
+                "ratio_snapshot": {
+                    "gross_margin": metrics.get("gross_margin", np.nan),
+                    "operating_margin": metrics.get("operating_margin", np.nan),
+                    "net_margin": metrics.get("net_margin", np.nan),
+                    "roe": metrics.get("roe", np.nan),
+                    "roic": metrics.get("roic", np.nan),
+                },
+                "recommendations": bundle.recommendations,
+                "major_holders": bundle.major_holders,
+            },
+        }
+    )
+
+action_l, action_r = st.columns([6, 1])
+with action_r:
+    st.markdown("<div class='report-widget'>", unsafe_allow_html=True)
+    st.markdown("<div class='report-widget-title'>Report</div>", unsafe_allow_html=True)
+    if pdf_bytes is None:
+        st.warning("PDF export unavailable: install `reportlab` in the active environment.")
+    else:
+        st.download_button(
+            label="Download PDF",
+            data=pdf_bytes,
+            file_name=f"{ticker}_{fy_label_for_report.replace(' ', '_')}_findings_report.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+        )
+        st.markdown(
+            f"<div class='report-widget-note'>{fy_label_for_report} | {ticker}</div>",
+            unsafe_allow_html=True,
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
 
 tabs = st.tabs(
     [
@@ -926,8 +1271,13 @@ with tabs[0]:
         score_view = scorecard_df.copy()
         score_view["Score"] = score_view["Score"].map(lambda x: f"{x:.2f} / 10")
         score_view["Weight"] = score_view["Weight"].map(lambda x: f"{x * 100:.0f}%")
+        if "Coverage" in score_view.columns:
+            score_view["Coverage"] = score_view["Coverage"].map(lambda x: f"{x * 100:.0f}%")
         score_view["Weighted"] = score_view["Weighted"].map(lambda x: f"{x:.2f}")
-        show_table(score_view[["Category", "Score", "Weight", "Weighted"]], max_rows=12, hide_index=True)
+        cols = ["Category", "Score", "Weight", "Weighted"]
+        if "Coverage" in score_view.columns:
+            cols.insert(3, "Coverage")
+        show_table(score_view[cols], max_rows=12, hide_index=True)
         st.caption("Use tabs 2-7 to deep-dive each layer: financials, risk, valuation/ML, and portfolio impact.")
 
 
@@ -1165,6 +1515,15 @@ with tabs[3]:
     h1.metric("Financial Health Score", f"{health_score:.1f} / 100")
     h2.metric("Revenue", fmt_money(metrics.get("revenue", np.nan)))
     h3.metric("Free Cash Flow", fmt_money(metrics.get("free_cash_flow", np.nan)))
+    h4, h5, h6, h7 = st.columns(4)
+    h4.metric("Profitability Subscore", f"{health_details.get('profitability_score', np.nan):.1f} / 100")
+    h5.metric("Growth Subscore", f"{health_details.get('growth_score', np.nan):.1f} / 100")
+    h6.metric("Solvency/Liquidity", f"{health_details.get('solvency_liquidity_score', np.nan):.1f} / 100")
+    h7.metric("Cash Efficiency", f"{health_details.get('cash_efficiency_score', np.nan):.1f} / 100")
+    st.caption(
+        f"Health model coverage: {fmt_pct(health_details.get('coverage', np.nan))}; "
+        f"FCF margin proxy: {fmt_pct(health_details.get('fcf_margin', np.nan))}."
+    )
 
 
 with tabs[4]:
@@ -1274,8 +1633,38 @@ with tabs[5]:
         d2.metric("Intrinsic Value/Share", fmt_money(dcf["intrinsic_per_share"]))
         d3.metric("Current Price", fmt_money(dcf["current_price"]))
         d4.metric("Undervaluation", fmt_pct(dcf["undervaluation_pct"]))
+        d5, d6, d7, d8 = st.columns(4)
+        d5.metric("DCF Confidence", fmt_pct(dcf.get("dcf_confidence", np.nan)))
+        d6.metric("Bear Value/Share", fmt_money(dcf.get("intrinsic_per_share_bear", np.nan)))
+        d7.metric("Base Value/Share", fmt_money(dcf.get("intrinsic_per_share_base", np.nan)))
+        d8.metric("Bull Value/Share", fmt_money(dcf.get("intrinsic_per_share_bull", np.nan)))
+        d9, d10, d11, d12 = st.columns(4)
+        d9.metric("Cost of Equity", fmt_pct(dcf.get("cost_of_equity", np.nan)))
+        d10.metric("Fair Value Low", fmt_money(dcf.get("intrinsic_per_share_low", np.nan)))
+        d11.metric("Fair Value High", fmt_money(dcf.get("intrinsic_per_share_high", np.nan)))
+        d12.metric("FCF Observations", f"{int(dcf.get('fcf_observations', 0) or 0)}")
+        st.caption(
+            f"DCF assumptions: normalized start FCF {fmt_money(dcf.get('fcf_start_normalized', np.nan))}, "
+            f"base growth {fmt_pct(dcf.get('base_fcf_growth', np.nan))}, volatility {fmt_pct(dcf.get('fcf_growth_vol', np.nan))}, "
+            f"bear/base/bull growth {fmt_pct(dcf.get('scenario_growth_bear', np.nan))} / "
+            f"{fmt_pct(dcf.get('scenario_growth_base', np.nan))} / {fmt_pct(dcf.get('scenario_growth_bull', np.nan))}, "
+            f"terminal growth {fmt_pct(dcf.get('terminal_growth', np.nan))}."
+        )
+        dcf_assumptions_df = pd.DataFrame(
+            [
+                ("Forecast horizon (years)", int(dcf.get("forecast_years", 0) or 0)),
+                ("Latest FCF", fmt_money(dcf.get("fcf_last", np.nan))),
+                ("Normalized start FCF", fmt_money(dcf.get("fcf_start_normalized", np.nan))),
+                ("Discount rate", fmt_pct(dcf.get("discount_rate", np.nan))),
+                ("Cost of equity", fmt_pct(dcf.get("cost_of_equity", np.nan))),
+                ("Terminal growth", fmt_pct(dcf.get("terminal_growth", np.nan))),
+                ("DCF confidence", fmt_pct(dcf.get("dcf_confidence", np.nan))),
+            ],
+            columns=["Assumption", "Value"],
+        )
+        show_table(dcf_assumptions_df, max_rows=20, hide_index=True)
 
-    arima = arima_forecast(close, steps=30, order=(1, 1, 1))
+    arima = arima_snapshot.copy() if isinstance(arima_snapshot, pd.DataFrame) else pd.DataFrame()
     if not arima.empty:
         hist = close.tail(100)
         fig = go.Figure()
@@ -1288,12 +1677,35 @@ with tabs[5]:
                 name="ARIMA Forecast",
             )
         )
+        if {"lower_ci", "upper_ci"}.issubset(arima.columns):
+            fig.add_trace(
+                go.Scatter(
+                    x=list(range(len(hist), len(hist) + len(arima))),
+                    y=arima["upper_ci"].values,
+                    mode="lines",
+                    line=dict(width=0),
+                    showlegend=False,
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=list(range(len(hist), len(hist) + len(arima))),
+                    y=arima["lower_ci"].values,
+                    mode="lines",
+                    fill="tonexty",
+                    fillcolor="rgba(122,164,255,0.18)",
+                    line=dict(width=0),
+                    name="Forecast Band",
+                )
+            )
         style_plotly(fig, title="ARIMA Price Forecast", height=360)
         fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
         fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
         st.plotly_chart(fig, use_container_width=True)
+        if "model_order" in arima.columns:
+            st.caption(f"ARIMA selected order: {arima['model_order'].iloc[0]} (auto-selected by AIC).")
 
-    ml = run_ml_models(close)
+    ml = ml_snapshot if isinstance(ml_snapshot, dict) else {"error": "ML output unavailable."}
     if "error" in ml:
         st.info(ml["error"])
     else:
@@ -1302,14 +1714,44 @@ with tabs[5]:
         ml2.metric("RF MAE", fmt_num(ml["mae"], 4))
         ml3.metric("Next Price", fmt_money(ml["next_price"]))
         ml4.metric("Up Probability", fmt_pct(ml["up_probability"]))
+        ml5, ml6, ml7 = st.columns(3)
+        ml5.metric("Signal Confidence", fmt_pct(ml.get("confidence", np.nan)))
+        ml6.metric("Mode", ml.get("model_mode", "N/A"))
+        ml7.metric("RMSE vs Naive", fmt_pct(ml.get("rmse_improvement_vs_naive", np.nan)))
+        ml8, ml9, ml10, ml11 = st.columns(4)
+        ml8.metric("Raw Up Probability", fmt_pct(ml.get("up_probability_raw", np.nan)))
+        ml9.metric("CV Accuracy", fmt_pct(ml.get("cv_accuracy", np.nan)))
+        ml10.metric("CV AUC", fmt_num(ml.get("cv_auc", np.nan), 3))
+        ml11.metric("CV Brier", fmt_num(ml.get("cv_brier", np.nan), 4))
+        ml12, ml13, ml14, ml15 = st.columns(4)
+        ml12.metric("CV RMSE", fmt_num(ml.get("cv_rmse", np.nan), 4))
+        ml13.metric("CV MAE", fmt_num(ml.get("cv_mae", np.nan), 4))
+        ml14.metric("Overfit Gap", fmt_pct(ml.get("overfit_gap", np.nan)))
+        ml15.metric("Samples / Features", f"{int(ml.get('n_samples', 0) or 0)} / {int(ml.get('n_features', 0) or 0)}")
+        ml16, ml17, ml18, ml19 = st.columns(4)
+        ml16.metric("Signal", ml.get("signal", "N/A"))
+        ml17.metric("Signal Threshold", fmt_pct(ml.get("signal_threshold", np.nan)))
+        ml18.metric("Backtest Sharpe", fmt_num(ml.get("bt_sharpe", np.nan), 3))
+        ml19.metric("Backtest Return", fmt_pct(ml.get("bt_annual_return", np.nan)))
+        ml20, ml21, ml22, ml23 = st.columns(4)
+        ml20.metric("Backtest Hit Rate", fmt_pct(ml.get("bt_hit_rate", np.nan)))
+        ml21.metric("Backtest Max Drawdown", fmt_pct(ml.get("bt_max_drawdown", np.nan)))
+        ml22.metric("Backtest Turnover", fmt_pct(ml.get("bt_turnover", np.nan)))
+        ml23.metric("Backtest Trades", f"{int(ml.get('bt_n_trades', 0) or 0)}")
+        st.caption(f"Validation method: {ml.get('validation_method', 'N/A')}")
+        if "warning" in ml:
+            st.warning(ml["warning"])
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=ml["y_test"].index, y=ml["y_test"].values, mode="lines", name="Actual"))
-        fig.add_trace(go.Scatter(x=ml["y_test"].index, y=ml["reg_pred"], mode="lines", name="Predicted"))
-        style_plotly(fig, title="ML Regression Fit", height=350)
-        fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
-        st.plotly_chart(fig, use_container_width=True)
+        if "y_test" in ml and "reg_pred" in ml:
+            fig = go.Figure()
+            actual_price = close.loc[ml["y_test"].index] * (1 + ml["y_test"])
+            pred_price = close.loc[ml["y_test"].index] * (1 + pd.Series(ml["reg_pred"], index=ml["y_test"].index))
+            fig.add_trace(go.Scatter(x=actual_price.index, y=actual_price.values, mode="lines", name="Actual"))
+            fig.add_trace(go.Scatter(x=pred_price.index, y=pred_price.values, mode="lines", name="Predicted"))
+            style_plotly(fig, title="ML Regression Fit (Price Space)", height=350)
+            fig.update_xaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
+            fig.update_yaxes(showgrid=True, gridcolor="rgba(255,255,255,0.08)")
+            st.plotly_chart(fig, use_container_width=True)
 
     if not bundle.quarterly_financials.empty and "Total Revenue" in bundle.quarterly_financials.index:
         rev_fc = forecast_statement_series(bundle.quarterly_financials.loc["Total Revenue"], periods=4)
@@ -1438,19 +1880,5 @@ with tabs[7]:
 
 
 st.divider()
-trend_view = (
-    "stable"
-    if abs(metrics.get("revenue_cagr", 0) or 0) < 0.03
-    else "growing"
-    if (metrics.get("revenue_cagr", 0) or 0) > 0
-    else "contracting"
-)
-
-risk = calculate_risk_metrics(close, confidence=0.95, horizon_days=1)
-summary = (
-    f"{ticker} screens as {trend_view}; health score {health_score:.1f}/100, "
-    f"ROE {fmt_pct(metrics.get('roe'))}, debt/equity {fmt_num(metrics.get('debt_to_equity'), 2)}, "
-    f"annualized volatility {fmt_pct(risk.get('annualized_volatility', np.nan))}."
-)
 st.markdown("**Analyst Summary**")
-st.write(summary)
+st.write(report_summary_text)
